@@ -15,13 +15,13 @@ namespace ERP.API.Services
     {
         private readonly UserManager<AppUser> _userManager;
         private readonly RoleManager<IdentityRole> _roleManager;
-        private readonly IDbContextFactory<AppDbContext> _contextFactory;
+        private readonly AppDbContext _context;
 
-        public SeedDataService(UserManager<AppUser> userManager, RoleManager<IdentityRole> roleManager, IDbContextFactory<AppDbContext> contextFactory)
+        public SeedDataService(UserManager<AppUser> userManager, RoleManager<IdentityRole> roleManager, AppDbContext context)
         {
             _roleManager = roleManager;
             _userManager = userManager;
-            _contextFactory = contextFactory;
+            _context = context;
         }
         //This method is used to seed the data in the database
         public async Task SeedDataAsync()
@@ -33,8 +33,7 @@ namespace ERP.API.Services
 
         private async Task MigrateDatabase()
         {
-            using var context = _contextFactory.CreateDbContext();
-            await context.Database.MigrateAsync();
+            await _context.Database.MigrateAsync();
         }
         private async Task SeedAdminUserIfNotExists()
         {

@@ -30,13 +30,17 @@ namespace ERP.API.Services
         private readonly SignInManager<AppUser> _signInManager;
         private readonly SmtpConfig _smtpConfig;
         private readonly IHttpContextAccessor _httpContextAccessor;
+        private readonly IEmailService _emailService;
+        private readonly ILogger<AccountService> _logger;
 
         public AccountService(
             IOptions<JwtConfig> jwtConfigOptions,
             UserManager<AppUser> userManager,
             SignInManager<AppUser> signInManager,
             IOptions<SmtpConfig> smtpConfigOptions,
-            IHttpContextAccessor httpContextAccessor)
+            IHttpContextAccessor httpContextAccessor,
+            IEmailService emailService,
+            ILogger<AccountService> logger  )
         {
             _jwtConfig = jwtConfigOptions.Value;
             _key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtConfig.SecretKey));
@@ -44,6 +48,8 @@ namespace ERP.API.Services
             _signInManager = signInManager;
             _smtpConfig = smtpConfigOptions.Value;
             _httpContextAccessor = httpContextAccessor;
+            _emailService = emailService;
+            _logger = logger;
         }
 
         public async Task<MethodResult<JwtTokenResponseVM>> LoginAsync(LoginVM loginVm)
@@ -224,20 +230,16 @@ namespace ERP.API.Services
             var emailToken = await _userManager.GenerateEmailConfirmationTokenAsync(user);
             var passwordToken = await _userManager.GeneratePasswordResetTokenAsync(user);
             var verificationUrl = $"https://{url}/api/Account/ConfirmEmail?email={Uri.EscapeDataString(user.Email!)}&emailToken={Uri.EscapeDataString(emailToken)}";
-            using (MailMessage mail = new MailMessage())
+
+            try
             {
-                mail.From = new MailAddress(ApplicationConstants.AdminAccount.Email);
-                mail.To.Add(user.Email!);
-                mail.Subject = "Activate Your Account";
-                mail.Body = $"<h4>Please click the following link to activate your account: <a href='{verificationUrl}'>Verify Me</a></h4>";
-                mail.IsBodyHtml = true;
-                using (SmtpClient smtp = new SmtpClient(_smtpConfig.Host, _smtpConfig.Port))
-                {
-                    smtp.UseDefaultCredentials = false;
-                    smtp.Credentials = new NetworkCredential(_smtpConfig.UserName, _smtpConfig.Password);
-                    smtp.EnableSsl = true;
-                    await smtp.SendMailAsync(mail);
-                }
+                await _emailService.SendEmailAsync(user.Email, "Activate Your Account", $"<h4>Please click the following link to activate your account: <a href='{verificationUrl}'>Verify Me</a></h4>");
+
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error Sending Verification Email To {Email}", user.Email);
+                return false;
             }
             return true;
         }

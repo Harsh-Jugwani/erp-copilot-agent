@@ -2,6 +2,7 @@
 using ERP.API.Models;
 using ERP.API.Utilities;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Http;
 using System.Net;
 using System.Net.Mail;
 
@@ -18,16 +19,19 @@ namespace ERP.API.Services
         private readonly SmtpConfig _smtp;
         private readonly ILogger<EmailService> _logger;
         private readonly IWebHostEnvironment _environment;
+        private readonly IHttpContextAccessor _httpContextAccessor;
 
 
         public EmailService(
             IOptions<SmtpConfig> smtpOptions,
             ILogger<EmailService> logger,
-            IWebHostEnvironment environment)
+            IWebHostEnvironment environment,
+            IHttpContextAccessor httpContextAccessor )
         {
             _smtp = smtpOptions?.Value ?? throw new ArgumentNullException(nameof(smtpOptions));
             _logger = logger;
             _environment = environment;
+            _httpContextAccessor = httpContextAccessor;
         }
 
         public async Task<bool> SendApprovalEmailAsync(ApprovalRequest request, string approverEmail)
@@ -38,8 +42,10 @@ namespace ERP.API.Services
                 _logger.LogWarning("Approval token expired before sending email to {To}", approverEmail);
                 throw new InvalidOperationException("Approval request has already expired.");
             }
-
-            var approvalLink = $"https://yourdomain.com/api/approval/process?token={request.ApprovalToken}";
+            var url = _httpContextAccessor.HttpContext?.Request.Host;
+            var baseUrl = $"https://{url}";
+            var approveLink = $"{baseUrl}/api/InvoiceApproval/process-token?token={request.ApprovalToken}&approve=true";
+            var rejectLink = $"{baseUrl}/api/InvoiceApproval/process-token?token={request.ApprovalToken}&approve=false";
 
             var placeholders = new Dictionary<string, string>
             {
@@ -50,7 +56,8 @@ namespace ERP.API.Services
                 { "InvoiceDate", request.Invoice.InvoiceDate.ToString("yyyy-MM-dd") },
                 { "RequestedBy", request.RequestedBy },
                 { "Remarks", request.Remarks ?? "No remarks" },
-                { "ApprovalLink", approvalLink },
+                { "ApprovalApproveLink", approveLink },
+                { "ApprovalRejectLink", rejectLink },
                 { "ExpiryDate", request.ExpiryDate.ToString("yyyy-MM-dd HH:mm:ss") },
                 { "CompanyName", "ERP System" }
             };
@@ -67,7 +74,7 @@ namespace ERP.API.Services
         {
             try
             {
-                var templatePath = Path.Combine(_environment.ContentRootPath, "Templates", "Emails", templateName);
+                var templatePath = Path.Combine(_environment.ContentRootPath, "Templates", templateName);
 
                 if (!File.Exists(templatePath))
                 {
@@ -103,25 +110,23 @@ namespace ERP.API.Services
             {
                 throw new InvalidOperationException("SMTP is not configured correctly.");
             }
-
-            var fromAddress = !string.IsNullOrWhiteSpace(_smtp.UserName) ? _smtp.UserName : _smtp.UserName;
-
-            using var message = new MailMessage();
-            message.From = new MailAddress(ApplicationConstants.AdminAccount.UserName);
-            message.To.Add(to);
-            message.Subject = subject;
-            message.Body = body;
-            message.IsBodyHtml = true;
-
-            using var client = new SmtpClient(_smtp.Host, _smtp.Port)
-            {
-                Credentials = new NetworkCredential(_smtp.UserName, _smtp.Password)
-            };
-
             try
             {
-                await client.SendMailAsync(message);
-                _logger.LogInformation("Email sent to {To} with subject '{Subject}'", to, subject);
+                using (MailMessage mail = new MailMessage())
+                {
+                    mail.From = new MailAddress(ApplicationConstants.AdminAccount.Email);
+                    mail.To.Add(to);
+                    mail.Subject = subject;
+                    mail.Body = body;
+                    mail.IsBodyHtml = true;
+                    using (SmtpClient smtp = new SmtpClient(_smtp.Host, _smtp.Port))
+                    {
+                        smtp.UseDefaultCredentials = false;
+                        smtp.Credentials = new NetworkCredential(_smtp.UserName, _smtp.Password);
+                        smtp.EnableSsl = true;
+                        await smtp.SendMailAsync(mail);
+                    }
+                }
                 return true;
             }
             catch (Exception ex)

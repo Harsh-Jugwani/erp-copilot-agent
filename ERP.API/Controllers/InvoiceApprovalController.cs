@@ -13,13 +13,13 @@ namespace ERP.API.Controllers
     {
         private readonly IFinanceService _financeService;
         private readonly ILogger<InvoiceApprovalController> _logger;
-        private readonly HttpContextAccessor _httpContextAccessor;
+        private readonly ICurrentUserService _currentUserService;
 
-        public InvoiceApprovalController(IFinanceService financeService, ILogger<InvoiceApprovalController> logger, HttpContextAccessor httpContextAccessor)
+        public InvoiceApprovalController(IFinanceService financeService, ILogger<InvoiceApprovalController> logger, ICurrentUserService currentUserService)
         {
             _financeService = financeService;
             _logger = logger;
-            _httpContextAccessor = httpContextAccessor;
+            _currentUserService = currentUserService;
         }
 
         /// <summary>
@@ -30,9 +30,7 @@ namespace ERP.API.Controllers
         {
             try
             {
-                var userId = _httpContextAccessor.HttpContext?.User?.FindFirst("sub")?.Value
-               ?? _httpContextAccessor.HttpContext?.User?.Identity?.Name
-               ?? string.Empty;
+                var userId = _currentUserService.UserId;
 
                 var pending = await _financeService.GetPendingApprovalsAsync(userId);
 
@@ -77,7 +75,7 @@ namespace ERP.API.Controllers
         {
             try
             {
-                var approval = await _financeService.GetPendingApprovalsAsync(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? string.Empty);
+                var approval = await _financeService.GetPendingApprovalsAsync(_currentUserService.UserId);
                 var specificApproval = approval.FirstOrDefault(a => a.Id == id);
 
                 if (specificApproval == null)
@@ -129,7 +127,7 @@ namespace ERP.API.Controllers
         {
             try
             {
-                var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+                var userId = _currentUserService.UserId;
                 if (string.IsNullOrWhiteSpace(userId))
                     return Unauthorized("User context not found.");
 
@@ -174,7 +172,7 @@ namespace ERP.API.Controllers
                 if (request == null || string.IsNullOrWhiteSpace(request.Remarks))
                     return BadRequest(new { success = false, message = "Rejection remarks are required." });
 
-                var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+                var userId = _currentUserService.UserId;
                 if (string.IsNullOrWhiteSpace(userId))
                     return Unauthorized("User context not found.");
 
@@ -210,11 +208,47 @@ namespace ERP.API.Controllers
         }
 
         /// <summary>
-        /// Process approval request via token (anonymous access for email link)
+        /// Process approval request via token (anonymous access for email link) - GET version for email links
+        /// </summary>
+        [HttpGet("process-token")]
+        [AllowAnonymous]
+        public async Task<IActionResult> ProcessApprovalByToken([FromQuery] string token, [FromQuery] bool approve = true, [FromQuery] string remarks = "")
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(token))
+                    return BadRequest(new { success = false, message = "Approval token is required." });
+
+                // call service to process token
+                var result = await _financeService.ProcessApprovalByTokenAsync(token, approve, remarks);
+
+                var statusText = approve ? "approved" : "rejected";
+                var html = $"<html><body style=\"font-family:Arial,sans-serif;padding:20px;\"><h2>Request {statusText}</h2><p>The approval request has been {statusText}. Thank you.</p></body></html>";
+                return Content(html, "text/html");
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogWarning(ex, "Invalid token processing: {Message}", ex.Message);
+                return BadRequest(new { success = false, message = ex.Message });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing approval by token");
+                return StatusCode(StatusCodes.Status500InternalServerError, new
+                {
+                    success = false,
+                    message = "An error occurred while processing the approval.",
+                    error = ex.Message
+                });
+            }
+        }
+
+        /// <summary>
+        /// Process approval request via token (anonymous access for email link) - POST version for programmatic calls
         /// </summary>
         [HttpPost("process-token")]
         [AllowAnonymous]
-        public async Task<IActionResult> ProcessApprovalByToken([FromBody] ProcessApprovalByTokenRequest request)
+        public async Task<IActionResult> ProcessApprovalByTokenPost([FromBody] ProcessApprovalByTokenRequest request)
         {
             try
             {
@@ -224,15 +258,14 @@ namespace ERP.API.Controllers
                 if (!request.Approve && string.IsNullOrWhiteSpace(request.Remarks))
                     return BadRequest(new { success = false, message = "Rejection remarks are required." });
 
-                // For demo purposes, you'd typically verify the token against the database
-                // This endpoint is meant to be called from email links
+                var result = await _financeService.ProcessApprovalByTokenAsync(request.Token, request.Approve, request.Remarks);
 
-                return Ok(new
-                {
-                    success = true,
-                    message = "This endpoint is for email link processing. Please use the /approve or /reject endpoints with proper authentication.",
-                    instruction = "To approve/reject, authenticate as an Admin user and use the POST endpoints with the approval ID."
-                });
+                return Ok(new { success = true, processed = result });
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogWarning(ex, "Invalid token processing: {Message}", ex.Message);
+                return BadRequest(new { success = false, message = ex.Message });
             }
             catch (Exception ex)
             {

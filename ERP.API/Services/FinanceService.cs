@@ -8,13 +8,14 @@ namespace ERP.API.Services
     public interface IFinanceService
     {
         Task<List<Invoice>> GetPendingInvoicesAsync();
-        Task<Invoice?> GetInvoiceByIdAsync(int invoiceId);
+        Task<Invoice?> GetInvoiceByIdAsync(string invoiceNumber);
         Task<List<ApprovalRequest>> GetPendingApprovalsAsync(string approverId);
         Task<List<ApproverDTO>> GetAdminApproversAsync();
         Task<int> CreateInvoiceAsync(Invoice invoice);
-        Task<ApprovalRequest> CreateApprovalRequestAsync(int invoiceId, string remarks);
+        Task<ApprovalRequest> CreateApprovalRequestAsync(string invoiceNumber, string remarks);
         Task<bool> ApproveInvoiceAsync(int approvalId);
         Task<bool> RejectInvoiceAsync(int approvalId, string remarks);
+        Task<bool> ProcessApprovalByTokenAsync(string token, bool approve, string remarks = "");
     }
 
     public class FinanceService : IFinanceService
@@ -24,14 +25,12 @@ namespace ERP.API.Services
         private readonly ILogger<FinanceService> _logger;
         private readonly string userId;
 
-        public FinanceService(AppDbContext db, IEmailService emailService, ILogger<FinanceService> logger, HttpContextAccessor httpContextAccessor)
+        public FinanceService(AppDbContext db, IEmailService emailService, ILogger<FinanceService> logger, ICurrentUserService currentUser)
         {
             _db = db;
             _emailService = emailService;
             _logger = logger;
-            userId = httpContextAccessor.HttpContext?.User?.FindFirst("sub")?.Value
-               ?? httpContextAccessor.HttpContext?.User?.Identity?.Name
-               ?? string.Empty;
+            userId = currentUser.UserId ?? string.Empty;
         }
 
         public async Task<List<Invoice>> GetPendingInvoicesAsync()
@@ -42,11 +41,11 @@ namespace ERP.API.Services
                 .ToListAsync();
         }
 
-        public async Task<Invoice?> GetInvoiceByIdAsync(int invoiceId)
+        public async Task<Invoice?> GetInvoiceByIdAsync(string invoiceNumber)
         {
             return await _db.Invoices
                 .Include(i => i.ApprovalRequests)
-                .FirstOrDefaultAsync(i => i.Id == invoiceId);
+                .FirstOrDefaultAsync(i => i.InvoiceNumber == invoiceNumber);
         }
 
         public async Task<List<ApprovalRequest>> GetPendingApprovalsAsync(string approverId)
@@ -86,22 +85,22 @@ namespace ERP.API.Services
             return invoice.Id;
         }
 
-        public async Task<ApprovalRequest> CreateApprovalRequestAsync(int invoiceId,string remarks)
+        public async Task<ApprovalRequest> CreateApprovalRequestAsync(string invoiceNumber, string remarks)
         {
             // Validate invoice exists
-            var invoice = await _db.Invoices.FirstOrDefaultAsync(i => i.Id == invoiceId);
+            var invoice = await _db.Invoices.FirstOrDefaultAsync(i => i.InvoiceNumber == invoiceNumber);
             if (invoice == null)
-                throw new InvalidOperationException($"Invoice {invoiceId} not found.");
+                throw new InvalidOperationException($"Invoice {invoiceNumber} not found.");
 
             List<ApproverDTO> approvers = await GetAdminApproversAsync();
-            
+
 
             // Create approval request
             var approval = new ApprovalRequest
             {
-                InvoiceId = invoiceId,
+                InvoiceId = invoice.Id,
                 RequestedBy = userId,
-                ApproverId = approvers.FirstOrDefault()?.Id,
+                ApproverId = approvers.LastOrDefault()?.Id,
                 Status = ApprovalStatus.Pending,
                 ApprovalToken = Guid.NewGuid().ToString("N"),
                 ExpiryDate = DateTime.UtcNow.AddDays(2),
@@ -116,7 +115,7 @@ namespace ERP.API.Services
             try
             {
                 await _emailService.SendApprovalEmailAsync(
-                    approval, approvers.FirstOrDefault()?.Email);
+                    approval, approvers.LastOrDefault()?.Email);
 
                 _logger.LogInformation(
                     "Approval request {ApprovalId} created and email sent to {Approver}",
@@ -182,6 +181,35 @@ namespace ERP.API.Services
 
             _logger.LogInformation("Approval request {ApprovalId} rejected by {ApproverId}", approvalId, approval.ApproverId);
             return true;
+        }
+
+        public async Task<bool> ProcessApprovalByTokenAsync(string token, bool approve, string remarks = "")
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                throw new ArgumentNullException(nameof(token));
+
+            var approval = await _db.ApprovalRequests
+                .Include(a => a.Invoice)
+                .FirstOrDefaultAsync(a => a.ApprovalToken == token);
+
+            if (approval == null)
+                throw new InvalidOperationException("Approval request not found for the provided token.");
+
+            if (approval.Status != ApprovalStatus.Pending)
+                throw new InvalidOperationException($"Approval request is already {approval.Status}.");
+
+            if (DateTime.UtcNow > approval.ExpiryDate)
+                throw new InvalidOperationException("Approval request has expired.");
+
+            if (approve)
+            {
+                return await ApproveInvoiceAsync(approval.Id);
+            }
+            else
+            {
+                var useRemarks = string.IsNullOrWhiteSpace(remarks) ? "Rejected via email" : remarks;
+                return await RejectInvoiceAsync(approval.Id, useRemarks);
+            }
         }
 
         public Task<int> CreateApprovalRequestAsync(int invoiceId, string requestedBy, string approverId, string remarks)

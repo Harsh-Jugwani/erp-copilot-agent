@@ -1,4 +1,4 @@
-using ERP.API.ERP.Agents.Core;
+using ERP.Agents.Core;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
